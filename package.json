@@ -1,0 +1,22 @@
+{
+  "name": "mind-the-lines",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm:dev -w @mind-the-lines/server\" \"npm:dev -w @mind-the-lines/client\"",
+    "dev:server": "npm run dev -w @mind-the-lines/server",
+    "dev:client": "npm run dev -w @mind-the-lines/client",
+    "build": "npm run build -w @mind-the-lines/shared && npm run build -w @mind-the-lines/server && npm run build -w @mind-the-lines/client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

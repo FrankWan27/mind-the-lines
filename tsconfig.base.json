@@ -1,0 +1,15 @@
+{
+  // Shared, minimal strict base for all workspaces.
+  // Note: module/moduleResolution are intentionally NOT set here.
+  //   - server extends this and uses NodeNext (module + moduleResolution).
+  //   - client uses Vite and "bundler" moduleResolution.
+  // Keeping the base free of module settings lets each workspace pick the
+  // resolution strategy appropriate to its runtime/bundler.
+  "compilerOptions": {
+    "target": "ES2022",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

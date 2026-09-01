@@ -1,0 +1,23 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    # The project is bind-mounted so edits on the host hot-reload in the
+    # container. Anonymous volumes shadow node_modules (root + per-workspace)
+    # so the host's (incompatible) or empty node_modules never clobber the
+    # container-installed dependencies.
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/shared/node_modules
+      - /app/server/node_modules
+      - /app/client/node_modules
+    ports:
+      # Only bound to localhost on the host; 0.0.0.0 inside the container.
+      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:5173:5173"
+    # Install deps for the container's platform, then run both dev servers.
+    # Vite must bind 0.0.0.0 inside the container to be reachable from the
+    # host port mapping (the client Vite config already sets server.host = true).
+    command: sh -c "npm install && npm run dev"

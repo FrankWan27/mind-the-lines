@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // "Bundler" resolution lets the server import the shared workspace's raw
+    // .ts source with extensionless relative paths (import '../../shared/src/types')
+    // under both tsx (dev) and tsc (build). NodeNext would demand ".js" suffixes
+    // on those imports, which then fail to resolve the .ts source.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "noEmit": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": ".."
+  },
+  "include": ["src/**/*", "../shared/src/**/*"]
+}

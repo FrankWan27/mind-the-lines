@@ -1,0 +1,15 @@
+# Local development image.
+# node:20-bookworm has a modern glibc (2.36), unlike the Amazon Linux 2 host
+# (glibc 2.26) which cannot run native Node 18+ binaries.
+FROM node:20-bookworm
+
+WORKDIR /app
+
+# Backend (Socket.IO/Express) and Vite dev server.
+EXPOSE 3001
+EXPOSE 5173
+
+# Dependencies are installed at container start (see docker-compose command)
+# so the mounted anonymous node_modules volumes are populated for the current
+# platform. Default to running both dev servers together.
+CMD ["npm", "run", "dev"]

@@ -1,0 +1,15 @@
+{
+  // Source-only package: consumers import the shared types via relative path
+  // (e.g. ../../shared/src/types.ts). This config exists so the shared package
+  // can be type-checked/built on its own and provides a base others may extend.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*"]
+}
