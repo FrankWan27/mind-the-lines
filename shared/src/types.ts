@@ -35,12 +35,13 @@ export interface Board {
 }
 
 /**
- * A stroke the player commits by tracing. Because tracing is constrained to
- * dealt segments, a stroke is just the ordered list of segment ids traced.
- * Rendering re-derives the polyline from the board's segments.
+ * A stroke the player commits by tracing. The player draws freely, but every
+ * point is snapped to the nearest dealt segment before it lands here, so the
+ * stroke is an ordered polyline of normalized points that all lie on the dealt
+ * lines. Rendering just connects the points.
  */
 export interface Stroke {
-  segmentIds: string[];
+  points: Point[];
 }
 
 export interface Drawing {

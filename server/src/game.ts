@@ -171,11 +171,16 @@ export class Game {
     const board = round.boards[playerId];
     if (!board) return false;
 
-    // Keep only strokes that reference segment ids actually on this board.
-    const validIds = new Set(board.segments.map((s) => s.id));
-    const cleanStrokes: Stroke[] = strokes.map((st) => ({
-      segmentIds: st.segmentIds.filter((id) => validIds.has(id)),
-    }));
+    // Strokes are free-drawn polylines already snapped to this board's lines on
+    // the client. Sanity-clamp every point into [0,1] and drop empty strokes.
+    const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+    const cleanStrokes: Stroke[] = strokes
+      .map((st) => ({
+        points: (st.points ?? [])
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+          .map((p) => ({ x: clamp01(p.x), y: clamp01(p.y) })),
+      }))
+      .filter((st) => st.points.length >= 2);
 
     const drawing: Drawing = {
       playerId,
