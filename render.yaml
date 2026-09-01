@@ -1,0 +1,29 @@
+# Render deployment for the Mind the Lines Socket.IO server.
+# The client is deployed separately on Vercel (static). This service is the
+# stateful, long-lived realtime process that holds game rooms in memory.
+#
+# After first deploy:
+#   1. Note this service's URL (e.g. https://mind-the-lines-server.onrender.com)
+#   2. In Vercel, set the client env var VITE_SERVER_URL to that URL.
+#   3. Set CLIENT_ORIGIN here to your Vercel domain(s), comma-separated.
+#
+# NOTE: Render's free tier sleeps after ~15 min idle; the first connection
+# after a sleep takes ~30-60s to wake the service. Fine for a hobby game.
+services:
+  - type: web
+    name: mind-the-lines-server
+    runtime: node
+    plan: free
+    # Install all workspace deps (server imports shared source), then run the
+    # server via tsx (no compiled output; shared is source-only).
+    buildCommand: npm install
+    startCommand: npm run start -w @mind-the-lines/server
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Render injects its own PORT; the server reads process.env.PORT.
+      # Set this to your Vercel domain(s) after the client is deployed.
+      # Comma-separated for multiple (production + preview).
+      - key: CLIENT_ORIGIN
+        sync: false

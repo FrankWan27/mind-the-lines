@@ -9,7 +9,13 @@ import type {
 import { Game } from './game.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
+// Comma-separated list of allowed client origins. Defaults to local Vite dev.
+// In production set e.g. CLIENT_ORIGIN="https://mind-the-lines.vercel.app"
+// (add preview domains too, comma-separated, if you want them to connect).
+const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN ?? 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 
 // 6-char uppercase room codes (no ambiguous chars).
 const roomCodeGen = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
@@ -28,7 +34,7 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
   httpServer,
   {
     cors: {
-      origin: CLIENT_ORIGIN,
+      origin: CLIENT_ORIGINS,
       methods: ['GET', 'POST'],
     },
   },
@@ -253,5 +259,5 @@ io.on('connection', (socket) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`[mind-the-lines] server listening on :${PORT} (client origin ${CLIENT_ORIGIN})`);
+  console.log(`[mind-the-lines] server listening on :${PORT} (client origins: ${CLIENT_ORIGINS.join(', ')})`);
 });
