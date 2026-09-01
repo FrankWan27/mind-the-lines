@@ -28,14 +28,36 @@ function dist(a: Point, b: Point): number {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
+// The four board edges. A spanning line picks two DIFFERENT edges and drops a
+// point on each, so it enters one side and exits another crossing the board.
+type Edge = 'top' | 'bottom' | 'left' | 'right';
+const EDGES: Edge[] = ['top', 'bottom', 'left', 'right'];
+
+/** A random point along the given edge, inset from the corners a touch. */
+function pointOnEdge(edge: Edge, rand: () => number): Point {
+  const t = 0.05 + rand() * 0.9; // stay off the exact corners
+  switch (edge) {
+    case 'top':
+      return { x: t, y: 0 };
+    case 'bottom':
+      return { x: t, y: 1 };
+    case 'left':
+      return { x: 0, y: t };
+    case 'right':
+      return { x: 1, y: t };
+  }
+}
+
 /**
- * Generate a deterministic "tangle" of traceable line segments.
+ * Generate a deterministic set of traceable lines that SPAN the board.
  *
- * Approach:
- *  1. Scatter nodes on a jittered grid so points are spread but irregular.
- *  2. Connect each node to a few of its nearest neighbours, producing a
- *     connected-ish web of segments.
- *  3. De-duplicate reciprocal edges and cap at `segmentCount`.
+ * The physical game's boards are full of long lines that cross the whole card,
+ * not a cluster of short local links. So here most lines go edge-to-edge:
+ *  1. Pick two different edges (e.g. left -> right, top -> bottom, left -> top)
+ *     and connect a random point on each. This guarantees the line traverses
+ *     the board.
+ *  2. Mix in a smaller share of long interior chords for variety, each forced
+ *     to be at least ~60% of the board wide so nothing is a stub.
  *
  * All endpoints are normalized into [0, 1].
  */
@@ -43,66 +65,41 @@ export function generateBoard(seed: string, segmentCount: number): Board {
   const rand = mulberry32(hashSeed(seed));
   const target = Math.max(1, Math.floor(segmentCount));
 
-  // Choose a grid roughly proportional to the requested segment count so the
-  // board fills the canvas at any size. Each cell hosts one jittered node.
-  const nodeCount = Math.max(4, Math.round(target * 0.9));
-  const cols = Math.max(2, Math.ceil(Math.sqrt(nodeCount)));
-  const rows = Math.max(2, Math.ceil(nodeCount / cols));
-
-  const nodes: Point[] = [];
-  const margin = 0.06;
-  const usable = 1 - margin * 2;
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (nodes.length >= nodeCount) break;
-      const cellW = usable / cols;
-      const cellH = usable / rows;
-      // Jitter within ~70% of the cell so nodes never overlap the grid lines.
-      const jx = (rand() - 0.5) * cellW * 0.7;
-      const jy = (rand() - 0.5) * cellH * 0.7;
-      const x = margin + cellW * (c + 0.5) + jx;
-      const y = margin + cellH * (r + 0.5) + jy;
-      nodes.push({ x: clamp01(x), y: clamp01(y) });
-    }
-  }
-
-  // Build candidate edges: connect each node to its 2-3 nearest neighbours.
-  const seen = new Set<string>();
   const segments: Segment[] = [];
-  const edgeKey = (i: number, j: number) => (i < j ? `${i}-${j}` : `${j}-${i}`);
+  const seen = new Set<string>();
+  // Round endpoints when de-duping so near-identical lines don't stack up.
+  const key = (a: Point, b: Point) => {
+    const q = (p: Point) => `${Math.round(p.x * 40)},${Math.round(p.y * 40)}`;
+    const [k1, k2] = [q(a), q(b)].sort();
+    return `${k1}|${k2}`;
+  };
 
-  const order = shuffledIndices(nodes.length, rand);
-  outer: for (const i of order) {
-    const neighbours = nodes
-      .map((p, j) => ({ j, d: dist(nodes[i], p) }))
-      .filter((n) => n.j !== i)
-      .sort((a, b) => a.d - b.d);
+  // ~75% edge-to-edge spanning lines, the rest long interior chords.
+  const spanTarget = Math.round(target * 0.75);
 
-    const linksPerNode = 2 + Math.floor(rand() * 2); // 2 or 3
-    for (let k = 0; k < Math.min(linksPerNode, neighbours.length); k++) {
-      const j = neighbours[k].j;
-      const key = edgeKey(i, j);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      segments.push({
-        id: `${seed}:s${segments.length}`,
-        a: nodes[i],
-        b: nodes[j],
-      });
-      if (segments.length >= target) break outer;
-    }
-  }
-
-  // If we still fall short (small boards), add random long connectors.
   let guard = 0;
-  while (segments.length < target && guard++ < target * 8) {
-    const i = Math.floor(rand() * nodes.length);
-    const j = Math.floor(rand() * nodes.length);
-    if (i === j) continue;
-    const key = edgeKey(i, j);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    segments.push({ id: `${seed}:s${segments.length}`, a: nodes[i], b: nodes[j] });
+  while (segments.length < target && guard++ < target * 40) {
+    let a: Point;
+    let b: Point;
+
+    if (segments.length < spanTarget) {
+      // Edge-to-edge: two distinct edges.
+      const e1 = EDGES[Math.floor(rand() * EDGES.length)];
+      let e2 = EDGES[Math.floor(rand() * EDGES.length)];
+      if (e2 === e1) e2 = EDGES[(EDGES.indexOf(e1) + 1 + Math.floor(rand() * 3)) % EDGES.length];
+      a = pointOnEdge(e1, rand);
+      b = pointOnEdge(e2, rand);
+    } else {
+      // Long interior chord: random points, rejected unless they span >= 60%.
+      a = { x: clamp01(0.04 + rand() * 0.92), y: clamp01(0.04 + rand() * 0.92) };
+      b = { x: clamp01(0.04 + rand() * 0.92), y: clamp01(0.04 + rand() * 0.92) };
+      if (dist(a, b) < 0.6) continue;
+    }
+
+    const k = key(a, b);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    segments.push({ id: `${seed}:s${segments.length}`, a, b });
   }
 
   return { seed, segments };
@@ -110,13 +107,4 @@ export function generateBoard(seed: string, segmentCount: number): Board {
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
-function shuffledIndices(n: number, rand: () => number): number[] {
-  const arr = Array.from({ length: n }, (_, i) => i);
-  for (let i = n - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
 }
