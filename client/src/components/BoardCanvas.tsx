@@ -3,8 +3,12 @@ import type { Board, Point, Segment, Stroke } from '../../../shared/src/types';
 
 const VIEW = 600; // SVG viewBox size; endpoints are normalized 0..1 and scaled to this.
 
-/** Max distance (normalized) a raw point can be from a line and still snap. */
+/** Max distance (normalized) a raw point can be from a line to first attach. */
 const SNAP_RADIUS = 0.06;
+/** Once attached to a line, keep tracing it until the finger drifts beyond this
+ * (wider) band. The hysteresis stops the ink from flickering onto whatever
+ * crossing line is momentarily closest, so one trace stays one stroke. */
+const STICKY_RADIUS = 0.11;
 /** Minimum move (normalized) between captured raw points, to thin the stream. */
 const MIN_STEP = 0.006;
 
@@ -76,16 +80,45 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     return best;
   }
 
+  /** Nearest vertex to p on ONE specific line, with its squared distance. */
+  function nearestVertexOnLine(p: Point, si: number): { vertex: number; d2: number } {
+    const pts = board.segments[si].points;
+    let bestVi = 0;
+    let bestD2 = Infinity;
+    for (let vi = 0; vi < pts.length; vi++) {
+      const dx = p.x - pts[vi].x;
+      const dy = p.y - pts[vi].y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        bestVi = vi;
+      }
+    }
+    return { vertex: bestVi, d2: bestD2 };
+  }
+
   /** Advance the trace given a fresh raw pointer sample. */
   function extend(raw: Point) {
-    const hit = nearestVertex(raw);
     setLive((prev) => {
+      const cur = cursor.current;
+
+      // Sticky: if already tracing a line and the finger is still within that
+      // line's wider band, stay on it (ignore nearer crossing lines). Only fall
+      // back to the globally nearest line (tighter radius) when clearly off it.
+      let hit: Hit | null = null;
+      if (cur) {
+        const onCur = nearestVertexOnLine(raw, cur.seg);
+        if (onCur.d2 <= STICKY_RADIUS * STICKY_RADIUS) {
+          hit = { seg: cur.seg, vertex: onCur.vertex, d2: onCur.d2 };
+        }
+      }
+      if (!hit) hit = nearestVertex(raw);
+
       // Left every line: end the current sub-stroke, wait to re-enter.
       if (!hit) {
         cursor.current = null;
         return prev;
       }
-      const cur = cursor.current;
       const pts = board.segments[hit.seg].points;
       // New sub-stroke: entered a line fresh, or jumped to a different line.
       if (!cur || cur.seg !== hit.seg) {
