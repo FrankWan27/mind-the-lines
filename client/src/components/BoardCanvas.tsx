@@ -42,17 +42,29 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     };
   }
 
-  /** Nearest point on segment [a,b] to p, plus the squared distance to it. */
+  /** Nearest point on a dealt line (a polyline of sub-segments) to p, plus the
+   * squared distance to it. */
   function projectToSegment(p: Point, s: Segment): { point: Point; d2: number } {
-    const abx = s.b.x - s.a.x;
-    const aby = s.b.y - s.a.y;
-    const len2 = abx * abx + aby * aby;
-    let t = len2 === 0 ? 0 : ((p.x - s.a.x) * abx + (p.y - s.a.y) * aby) / len2;
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    const point = { x: s.a.x + abx * t, y: s.a.y + aby * t };
-    const dx = p.x - point.x;
-    const dy = p.y - point.y;
-    return { point, d2: dx * dx + dy * dy };
+    let best: Point = s.points[0];
+    let bestD2 = Infinity;
+    for (let i = 0; i < s.points.length - 1; i++) {
+      const a = s.points[i];
+      const b = s.points[i + 1];
+      const abx = b.x - a.x;
+      const aby = b.y - a.y;
+      const len2 = abx * abx + aby * aby;
+      let t = len2 === 0 ? 0 : ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const point = { x: a.x + abx * t, y: a.y + aby * t };
+      const dx = p.x - point.x;
+      const dy = p.y - point.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = point;
+      }
+    }
+    return { point: best, d2: bestD2 };
   }
 
   /** Snap a raw point to the closest dealt segment, or null if too far. */
@@ -136,14 +148,11 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
       >
         <rect x={0} y={0} width={VIEW} height={VIEW} className="board-bg" rx={12} />
 
-        {/* Faint dealt segments (the lines to mind). */}
+        {/* Faint dealt curves (the lines to mind). */}
         {board.segments.map((seg) => (
-          <line
+          <polyline
             key={`base-${seg.id}`}
-            x1={px(seg.a.x)}
-            y1={px(seg.a.y)}
-            x2={px(seg.b.x)}
-            y2={px(seg.b.y)}
+            points={toPolyPoints(seg.points)}
             className="seg-base"
           />
         ))}
