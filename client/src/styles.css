@@ -151,7 +151,7 @@ body {
 }
 .board-svg.editable { cursor: crosshair; }
 .board-bg { fill: var(--bg-2); }
-.seg-base { stroke: var(--line-faint); stroke-width: 2.5; stroke-dasharray: 6 7; stroke-linecap: round; }
+.seg-base { fill: none; stroke: var(--line-faint); stroke-width: 2.5; stroke-dasharray: 6 7; stroke-linecap: round; stroke-linejoin: round; }
 .seg-ink {
   stroke: var(--line-ink); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round;
   fill: none;

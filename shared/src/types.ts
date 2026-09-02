@@ -21,11 +21,12 @@ export interface Point {
   y: number;
 }
 
-/** A single dealt line segment the player is allowed to trace along. */
+/** A single dealt line the player may trace along. It is a wandering path that
+ * spans the board, stored as an ordered polyline of points (a smooth curve is
+ * sampled into enough points that snapping and rendering treat it as curved). */
 export interface Segment {
   id: string;
-  a: Point; // endpoint A
-  b: Point; // endpoint B
+  points: Point[]; // >= 2 points, normalized 0..1, ordered along the line
 }
 
 /** The random board dealt to one player for one round. */
@@ -36,7 +37,7 @@ export interface Board {
 
 /**
  * A stroke the player commits by tracing. The player draws freely, but every
- * point is snapped to the nearest dealt segment before it lands here, so the
+ * point is snapped to the nearest dealt line before it lands here, so the
  * stroke is an ordered polyline of normalized points that all lie on the dealt
  * lines. Rendering just connects the points.
  */
@@ -101,7 +102,7 @@ export interface GameSettings {
 export const DEFAULT_SETTINGS: GameSettings = {
   totalRounds: 4,
   drawSeconds: 120,
-  segmentsPerBoard: 14,
+  segmentsPerBoard: 9,
 };
 
 // ----------------------------------------------------------------------------
