@@ -147,17 +147,18 @@ body {
   background: var(--bg-2);
   border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.06);
-  touch-action: manipulation;
+  touch-action: none;
 }
+.board-svg.editable { cursor: crosshair; }
 .board-bg { fill: var(--bg-2); }
 .seg-base { stroke: var(--line-faint); stroke-width: 2.5; stroke-dasharray: 6 7; stroke-linecap: round; }
 .seg-ink {
-  stroke: var(--line-ink); stroke-width: 7; stroke-linecap: round;
+  stroke: var(--line-ink); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round;
+  fill: none;
   filter: drop-shadow(0 0 6px rgba(255, 122, 194, 0.5));
 }
+.seg-ink.live { opacity: 0.85; }
 .seg-node { fill: var(--line-faint); }
-.seg-hit { stroke: transparent; stroke-width: 22; stroke-linecap: round; cursor: pointer; }
-.board-svg.editable .seg-hit:hover { stroke: rgba(124, 92, 255, 0.18); }
 
 .board-tools { display: flex; align-items: center; gap: 14px; }
 .board-hint { color: var(--muted); font-size: 13px; }
