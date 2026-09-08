@@ -3,34 +3,53 @@ import type { Board, Point, Segment, Stroke } from '../../../shared/src/types';
 
 const VIEW = 600; // SVG viewBox size; endpoints are normalized 0..1 and scaled to this.
 
-/** Max distance (normalized) a raw point can be from a line and still snap. */
-const SNAP_RADIUS = 0.12;
-/** Minimum move (normalized) between captured points, to thin out the stream. */
-const MIN_STEP = 0.008;
+/** Max distance (normalized) a raw point can be from a line to first attach. */
+const SNAP_RADIUS = 0.06;
+/** Once attached to a line, keep tracing it until the finger drifts beyond this
+ * (wider) band. The hysteresis stops the ink from flickering onto whatever
+ * crossing line is momentarily closest, so one trace stays one stroke. */
+const STICKY_RADIUS = 0.11;
+/** Minimum move (normalized) between captured raw points, to thin the stream. */
+const MIN_STEP = 0.006;
 
 interface Props {
   board: Board;
-  /** Committed strokes: free-drawn polylines already snapped to the board's lines. */
+  /** Committed strokes: polylines that lie ON the dealt curves (snapped). */
   value: Stroke[];
   editable: boolean;
   onChange?: (strokes: Stroke[]) => void;
 }
 
+/** Nearest dealt-curve vertex to a raw point: which line, which vertex, dist². */
+interface Hit {
+  seg: number; // index into board.segments
+  vertex: number; // index into that segment's points
+  d2: number;
+}
+
 /**
  * The "mind the lines" board.
  *
- * All dealt segments are drawn faint (the lines you must trace along). When
- * editable, the player draws FREELY with pointer/touch, but every point is
- * projected onto the nearest dealt segment before it's kept, so ink always lies
- * on the dealt lines. Points beyond SNAP_RADIUS from every line are ignored, so
- * you can lift between lines without leaving stray marks.
+ * Dealt lines are wandering curves, each a dense polyline of points. When
+ * editable the player draws FREELY, but the ink is constrained to lie ON those
+ * curves: for each raw pointer sample we find the nearest curve vertex and emit
+ * the curve's ACTUAL vertices walked between the last position and the new one.
+ * So ink always follows a real line and never bridges straight across empty
+ * space. The stroke breaks (starts a new sub-stroke) when the pointer leaves
+ * every line or jumps to a different line, so lifting between lines leaves no
+ * stray marks.
  */
 export default function BoardCanvas({ board, value, editable, onChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const [live, setLive] = useState<Point[] | null>(null); // stroke in progress
+  // Sub-strokes traced so far in the current gesture (each lies on one curve).
+  const [live, setLive] = useState<Point[][]>([]);
   const drawing = useRef(false);
+  // Where we currently are on the dealt graph: which line + vertex, or null.
+  const cursor = useRef<{ seg: number; vertex: number } | null>(null);
+  const lastRaw = useRef<Point | null>(null);
 
   const px = (n: number) => n * VIEW;
+  const toPolyPoints = (pts: Point[]) => pts.map((p) => `${px(p.x)},${px(p.y)}`).join(' ');
 
   /** Convert a pointer event to normalized [0,1] board coordinates. */
   function toBoard(e: React.PointerEvent): Point {
@@ -42,55 +61,81 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     };
   }
 
-  /** Nearest point on a dealt line (a polyline of sub-segments) to p, plus the
-   * squared distance to it. */
-  function projectToSegment(p: Point, s: Segment): { point: Point; d2: number } {
-    let best: Point = s.points[0];
-    let bestD2 = Infinity;
-    for (let i = 0; i < s.points.length - 1; i++) {
-      const a = s.points[i];
-      const b = s.points[i + 1];
-      const abx = b.x - a.x;
-      const aby = b.y - a.y;
-      const len2 = abx * abx + aby * aby;
-      let t = len2 === 0 ? 0 : ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      const point = { x: a.x + abx * t, y: a.y + aby * t };
-      const dx = p.x - point.x;
-      const dy = p.y - point.y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < bestD2) {
-        bestD2 = d2;
-        best = point;
-      }
-    }
-    return { point: best, d2: bestD2 };
-  }
-
-  /** Snap a raw point to the closest dealt segment, or null if too far. */
-  function snap(p: Point): Point | null {
-    let best: Point | null = null;
+  /** Nearest dealt-curve vertex to p within SNAP_RADIUS, or null if too far. */
+  function nearestVertex(p: Point): Hit | null {
+    let best: Hit | null = null;
     let bestD2 = SNAP_RADIUS * SNAP_RADIUS;
-    for (const s of board.segments) {
-      const { point, d2 } = projectToSegment(p, s);
-      if (d2 <= bestD2) {
-        bestD2 = d2;
-        best = point;
+    board.segments.forEach((s: Segment, si) => {
+      for (let vi = 0; vi < s.points.length; vi++) {
+        const q = s.points[vi];
+        const dx = p.x - q.x;
+        const dy = p.y - q.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= bestD2) {
+          bestD2 = d2;
+          best = { seg: si, vertex: vi, d2 };
+        }
       }
-    }
+    });
     return best;
   }
 
-  function appendSnapped(raw: Point) {
-    const snapped = snap(raw);
-    if (!snapped) return;
+  /** Nearest vertex to p on ONE specific line, with its squared distance. */
+  function nearestVertexOnLine(p: Point, si: number): { vertex: number; d2: number } {
+    const pts = board.segments[si].points;
+    let bestVi = 0;
+    let bestD2 = Infinity;
+    for (let vi = 0; vi < pts.length; vi++) {
+      const dx = p.x - pts[vi].x;
+      const dy = p.y - pts[vi].y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        bestVi = vi;
+      }
+    }
+    return { vertex: bestVi, d2: bestD2 };
+  }
+
+  /** Advance the trace given a fresh raw pointer sample. */
+  function extend(raw: Point) {
     setLive((prev) => {
-      if (!prev || prev.length === 0) return [snapped];
-      const last = prev[prev.length - 1];
-      const dx = snapped.x - last.x;
-      const dy = snapped.y - last.y;
-      if (dx * dx + dy * dy < MIN_STEP * MIN_STEP) return prev;
-      return [...prev, snapped];
+      const cur = cursor.current;
+
+      // Sticky: if already tracing a line and the finger is still within that
+      // line's wider band, stay on it (ignore nearer crossing lines). Only fall
+      // back to the globally nearest line (tighter radius) when clearly off it.
+      let hit: Hit | null = null;
+      if (cur) {
+        const onCur = nearestVertexOnLine(raw, cur.seg);
+        if (onCur.d2 <= STICKY_RADIUS * STICKY_RADIUS) {
+          hit = { seg: cur.seg, vertex: onCur.vertex, d2: onCur.d2 };
+        }
+      }
+      if (!hit) hit = nearestVertex(raw);
+
+      // Left every line: end the current sub-stroke, wait to re-enter.
+      if (!hit) {
+        cursor.current = null;
+        return prev;
+      }
+      const pts = board.segments[hit.seg].points;
+      // New sub-stroke: entered a line fresh, or jumped to a different line.
+      if (!cur || cur.seg !== hit.seg) {
+        cursor.current = { seg: hit.seg, vertex: hit.vertex };
+        return [...prev, [{ ...pts[hit.vertex] }]];
+      }
+      // Same line: walk the curve's real vertices from last index to this one.
+      const added: Point[] = [];
+      const step = hit.vertex >= cur.vertex ? 1 : -1;
+      for (let k = cur.vertex + step; k !== hit.vertex + step; k += step) {
+        added.push({ ...pts[k] });
+      }
+      cursor.current = { seg: hit.seg, vertex: hit.vertex };
+      if (added.length === 0) return prev;
+      const next = prev.slice();
+      next[next.length - 1] = [...next[next.length - 1], ...added];
+      return next;
     });
   }
 
@@ -99,29 +144,45 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     e.preventDefault();
     svgRef.current?.setPointerCapture(e.pointerId);
     drawing.current = true;
-    const snapped = snap(toBoard(e));
-    setLive(snapped ? [snapped] : []);
+    cursor.current = null;
+    lastRaw.current = toBoard(e);
+    setLive([]);
+    extend(lastRaw.current);
   }
 
   function onPointerMove(e: React.PointerEvent) {
     if (!drawing.current) return;
     e.preventDefault();
-    appendSnapped(toBoard(e));
+    const raw = toBoard(e);
+    const lr = lastRaw.current;
+    if (lr) {
+      const dx = raw.x - lr.x;
+      const dy = raw.y - lr.y;
+      if (dx * dx + dy * dy < MIN_STEP * MIN_STEP) return;
+    }
+    lastRaw.current = raw;
+    extend(raw);
   }
 
   function endStroke() {
     if (!drawing.current) return;
     drawing.current = false;
-    const pts = live;
-    setLive(null);
-    if (onChange && pts && pts.length >= 2) {
-      onChange([...value, { points: pts }]);
-    }
+    cursor.current = null;
+    lastRaw.current = null;
+    setLive((liveNow) => {
+      if (onChange) {
+        const committed: Stroke[] = liveNow
+          .filter((ss) => ss.length >= 2)
+          .map((ss) => ({ points: ss }));
+        if (committed.length) onChange([...value, ...committed]);
+      }
+      return [];
+    });
   }
 
   function clear() {
     if (!editable || !onChange) return;
-    setLive(null);
+    setLive([]);
     onChange([]);
   }
 
@@ -129,8 +190,6 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     if (!editable || !onChange) return;
     onChange(value.slice(0, -1));
   }
-
-  const toPolyPoints = (pts: Point[]) => pts.map((p) => `${px(p.x)},${px(p.y)}`).join(' ');
 
   return (
     <div className="board-canvas">
@@ -150,23 +209,21 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
 
         {/* Faint dealt curves (the lines to mind). */}
         {board.segments.map((seg) => (
-          <polyline
-            key={`base-${seg.id}`}
-            points={toPolyPoints(seg.points)}
-            className="seg-base"
-          />
+          <polyline key={`base-${seg.id}`} points={toPolyPoints(seg.points)} className="seg-base" />
         ))}
 
-        {/* Committed ink strokes (free-drawn, snapped). */}
+        {/* Committed ink strokes (each lies on a dealt curve). */}
         {value.map((stroke, i) =>
           stroke.points.length >= 2 ? (
             <polyline key={`ink-${i}`} points={toPolyPoints(stroke.points)} className="seg-ink" />
           ) : null,
         )}
 
-        {/* Stroke currently being drawn. */}
-        {live && live.length >= 2 && (
-          <polyline points={toPolyPoints(live)} className="seg-ink live" />
+        {/* Sub-strokes currently being drawn. */}
+        {live.map((ss, i) =>
+          ss.length >= 2 ? (
+            <polyline key={`live-${i}`} points={toPolyPoints(ss)} className="seg-ink live" />
+          ) : null,
         )}
       </svg>
 
