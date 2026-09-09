@@ -160,8 +160,22 @@ body {
 .seg-ink.live { opacity: 0.85; }
 .seg-node { fill: var(--line-faint); }
 
-.board-tools { display: flex; align-items: center; gap: 14px; }
+.board-tools { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .board-hint { color: var(--muted); font-size: 13px; }
+
+/* Pen-size ring following the cursor: shows the current brush radius. */
+.brush-ring {
+  fill: none;
+  stroke: var(--line-ink);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* Pen-size slider. */
+.pen-size { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.pen-size input[type='range'] { width: 110px; accent-color: var(--line-ink); }
 
 /* ---------- Drawing ---------- */
 .drawing { align-items: center; }
