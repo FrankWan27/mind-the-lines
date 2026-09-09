@@ -3,49 +3,43 @@ import type { Board, Point, Segment, Stroke } from '../../../shared/src/types';
 
 const VIEW = 600; // SVG viewBox size; endpoints are normalized 0..1 and scaled to this.
 
-/** Max distance (normalized) a raw point can be from a line to first attach. */
-const SNAP_RADIUS = 0.06;
-/** Once attached to a line, keep tracing it until the finger drifts beyond this
- * (wider) band. The hysteresis stops the ink from flickering onto whatever
- * crossing line is momentarily closest, so one trace stays one stroke. */
-const STICKY_RADIUS = 0.11;
-/** Minimum move (normalized) between captured raw points, to thin the stream. */
-const MIN_STEP = 0.006;
+/** Brush radius (normalized): a point on a dealt line within this distance of
+ * the pointer gets coloured in. Small, so only the bit under the cursor fills. */
+const BRUSH = 0.035;
+/** Minimum move (normalized) between processed pointer samples, to thin the
+ * stream. Kept below BRUSH so the swept circles overlap and leave no gaps. */
+const MIN_STEP = 0.004;
 
 interface Props {
   board: Board;
-  /** Committed strokes: polylines that lie ON the dealt curves (snapped). */
+  /** Committed strokes: polylines that lie ON the dealt curves. */
   value: Stroke[];
   editable: boolean;
   onChange?: (strokes: Stroke[]) => void;
-}
-
-/** Nearest dealt-curve vertex to a raw point: which line, which vertex, dist². */
-interface Hit {
-  seg: number; // index into board.segments
-  vertex: number; // index into that segment's points
-  d2: number;
 }
 
 /**
  * The "mind the lines" board.
  *
  * Dealt lines are wandering curves, each a dense polyline of points. When
- * editable the player draws FREELY, but the ink is constrained to lie ON those
- * curves: for each raw pointer sample we find the nearest curve vertex and emit
- * the curve's ACTUAL vertices walked between the last position and the new one.
- * So ink always follows a real line and never bridges straight across empty
- * space. The stroke breaks (starts a new sub-stroke) when the pointer leaves
- * every line or jumps to a different line, so lifting between lines leaves no
- * stray marks.
+ * editable the player "colours in" the lines: we treat the pointer as a small
+ * round brush and, for every dealt curve, fill in exactly the vertices that
+ * fall inside the brush circle. There is no line-following or tracing — ink
+ * appears only where the brush actually overlapped a line, so it can never
+ * bridge across empty space and never runs ahead of the finger.
+ *
+ * Coverage is tracked per dealt vertex (a boolean per segment vertex) and is
+ * order-independent: painting the same spot twice is idempotent, and lifting or
+ * jumping the pointer just leaves the already-coloured runs in place. On commit
+ * each maximal run of coloured vertices on a segment becomes one ink polyline.
  */
 export default function BoardCanvas({ board, value, editable, onChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
-  // Sub-strokes traced so far in the current gesture (each lies on one curve).
-  const [live, setLive] = useState<Point[][]>([]);
+  // Per-segment coverage for the CURRENT gesture: covered[si][vi] = painted.
+  const covered = useRef<boolean[][]>([]);
+  // Bump to re-render as coverage changes mid-gesture (refs don't trigger it).
+  const [tick, setTick] = useState(0);
   const drawing = useRef(false);
-  // Where we currently are on the dealt graph: which line + vertex, or null.
-  const cursor = useRef<{ seg: number; vertex: number } | null>(null);
   const lastRaw = useRef<Point | null>(null);
 
   const px = (n: number) => n * VIEW;
@@ -61,100 +55,50 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     };
   }
 
-  /** Nearest dealt-curve vertex to p within SNAP_RADIUS, or null if too far. */
-  function nearestVertex(p: Point): Hit | null {
-    let best: Hit | null = null;
-    let bestD2 = SNAP_RADIUS * SNAP_RADIUS;
+  function freshCoverage(): boolean[][] {
+    return board.segments.map((s) => new Array<boolean>(s.points.length).fill(false));
+  }
+
+  /** Paint: mark every dealt-curve vertex within BRUSH of the pointer. */
+  function paintAt(p: Point) {
+    const r2 = BRUSH * BRUSH;
+    const cov = covered.current;
+    let changed = false;
     board.segments.forEach((s: Segment, si) => {
+      const row = cov[si];
       for (let vi = 0; vi < s.points.length; vi++) {
+        if (row[vi]) continue;
         const q = s.points[vi];
         const dx = p.x - q.x;
         const dy = p.y - q.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 <= bestD2) {
-          bestD2 = d2;
-          best = { seg: si, vertex: vi, d2 };
+        if (dx * dx + dy * dy <= r2) {
+          row[vi] = true;
+          changed = true;
         }
       }
     });
-    return best;
+    if (changed) setTick((t) => t + 1);
   }
 
-  /** Nearest vertex to p on ONE specific line, with its squared distance. */
-  function nearestVertexOnLine(p: Point, si: number): { vertex: number; d2: number } {
-    const pts = board.segments[si].points;
-    let bestVi = 0;
-    let bestD2 = Infinity;
-    for (let vi = 0; vi < pts.length; vi++) {
-      const dx = p.x - pts[vi].x;
-      const dy = p.y - pts[vi].y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < bestD2) {
-        bestD2 = d2;
-        bestVi = vi;
+  /** Fold the current coverage into ink polylines: each maximal run of covered
+   * vertices on a segment is one stroke (>= 2 points to be visible). */
+  function coverageToStrokes(): Stroke[] {
+    const out: Stroke[] = [];
+    board.segments.forEach((s: Segment, si) => {
+      const row = covered.current[si];
+      if (!row) return;
+      let run: Point[] = [];
+      const flush = () => {
+        if (run.length >= 2) out.push({ points: run });
+        run = [];
+      };
+      for (let vi = 0; vi < s.points.length; vi++) {
+        if (row[vi]) run.push({ ...s.points[vi] });
+        else flush();
       }
-    }
-    return { vertex: bestVi, d2: bestD2 };
-  }
-
-  /** Advance the trace given a fresh raw pointer sample. `moved` is how far the
-   * finger travelled (normalized) since the last sample, which bounds how far
-   * the ink may advance along the curve. */
-  function extend(raw: Point, moved: number) {
-    setLive((prev) => {
-      const cur = cursor.current;
-
-      // Sticky: if already tracing a line and the finger is still within that
-      // line's wider band, stay on it (ignore nearer crossing lines). Only fall
-      // back to the globally nearest line (tighter radius) when clearly off it.
-      let hit: Hit | null = null;
-      if (cur) {
-        const onCur = nearestVertexOnLine(raw, cur.seg);
-        if (onCur.d2 <= STICKY_RADIUS * STICKY_RADIUS) {
-          hit = { seg: cur.seg, vertex: onCur.vertex, d2: onCur.d2 };
-        }
-      }
-      if (!hit) hit = nearestVertex(raw);
-
-      // Left every line: end the current sub-stroke, wait to re-enter.
-      if (!hit) {
-        cursor.current = null;
-        return prev;
-      }
-      const pts = board.segments[hit.seg].points;
-      // New sub-stroke: entered a line fresh, or jumped to a different line.
-      if (!cur || cur.seg !== hit.seg) {
-        cursor.current = { seg: hit.seg, vertex: hit.vertex };
-        return [...prev, [{ ...pts[hit.vertex] }]];
-      }
-      // Same line: walk the curve's real vertices toward the finger's nearest
-      // vertex, but only as FAR ALONG THE CURVE as the finger actually moved
-      // this sample. Without this cap a small motion (or a mid-line attach)
-      // snaps the ink across a big chunk of the line at once. `budget` is the
-      // finger's raw travel distance; we consume it vertex by vertex and stop
-      // when it runs out, so the ink advances 1:1 with the finger.
-      const added: Point[] = [];
-      const step = hit.vertex >= cur.vertex ? 1 : -1;
-      let budget = moved;
-      let k = cur.vertex;
-      let landed = cur.vertex;
-      while (k !== hit.vertex) {
-        const nk = k + step;
-        const dx = pts[nk].x - pts[k].x;
-        const dy = pts[nk].y - pts[k].y;
-        const segLen = Math.hypot(dx, dy);
-        if (budget < segLen) break; // finger hasn't moved far enough to reach nk
-        budget -= segLen;
-        added.push({ ...pts[nk] });
-        landed = nk;
-        k = nk;
-      }
-      cursor.current = { seg: hit.seg, vertex: landed };
-      if (added.length === 0) return prev;
-      const next = prev.slice();
-      next[next.length - 1] = [...next[next.length - 1], ...added];
-      return next;
+      flush();
     });
+    return out;
   }
 
   function onPointerDown(e: React.PointerEvent) {
@@ -162,10 +106,9 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     e.preventDefault();
     svgRef.current?.setPointerCapture(e.pointerId);
     drawing.current = true;
-    cursor.current = null;
+    covered.current = freshCoverage();
     lastRaw.current = toBoard(e);
-    setLive([]);
-    extend(lastRaw.current, 0);
+    paintAt(lastRaw.current);
   }
 
   function onPointerMove(e: React.PointerEvent) {
@@ -173,37 +116,29 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     e.preventDefault();
     const raw = toBoard(e);
     const lr = lastRaw.current;
-    let moved = Infinity;
     if (lr) {
       const dx = raw.x - lr.x;
       const dy = raw.y - lr.y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < MIN_STEP * MIN_STEP) return;
-      moved = Math.sqrt(d2);
+      if (dx * dx + dy * dy < MIN_STEP * MIN_STEP) return;
     }
     lastRaw.current = raw;
-    extend(raw, moved);
+    paintAt(raw);
   }
 
   function endStroke() {
     if (!drawing.current) return;
     drawing.current = false;
-    cursor.current = null;
     lastRaw.current = null;
-    setLive((liveNow) => {
-      if (onChange) {
-        const committed: Stroke[] = liveNow
-          .filter((ss) => ss.length >= 2)
-          .map((ss) => ({ points: ss }));
-        if (committed.length) onChange([...value, ...committed]);
-      }
-      return [];
-    });
+    const committed = coverageToStrokes();
+    covered.current = [];
+    setTick((t) => t + 1);
+    if (onChange && committed.length) onChange([...value, ...committed]);
   }
 
   function clear() {
     if (!editable || !onChange) return;
-    setLive([]);
+    covered.current = [];
+    setTick((t) => t + 1);
     onChange([]);
   }
 
@@ -211,6 +146,10 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     if (!editable || !onChange) return;
     onChange(value.slice(0, -1));
   }
+
+  // Live ink for the in-progress gesture (recomputed each render via tick).
+  void tick;
+  const liveStrokes = drawing.current ? coverageToStrokes() : [];
 
   return (
     <div className="board-canvas">
@@ -240,10 +179,10 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
           ) : null,
         )}
 
-        {/* Sub-strokes currently being drawn. */}
-        {live.map((ss, i) =>
-          ss.length >= 2 ? (
-            <polyline key={`live-${i}`} points={toPolyPoints(ss)} className="seg-ink live" />
+        {/* Coloured-in runs for the in-progress gesture. */}
+        {liveStrokes.map((ss, i) =>
+          ss.points.length >= 2 ? (
+            <polyline key={`live-${i}`} points={toPolyPoints(ss.points)} className="seg-ink live" />
           ) : null,
         )}
       </svg>
@@ -256,7 +195,7 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
           <button type="button" className="btn ghost" onClick={clear} disabled={value.length === 0}>
             Clear
           </button>
-          <span className="board-hint">Draw freely — your ink snaps to the nearest line</span>
+          <span className="board-hint">Colour in the lines — drag the brush over them</span>
         </div>
       )}
     </div>
