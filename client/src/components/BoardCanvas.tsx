@@ -97,8 +97,10 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     return { vertex: bestVi, d2: bestD2 };
   }
 
-  /** Advance the trace given a fresh raw pointer sample. */
-  function extend(raw: Point) {
+  /** Advance the trace given a fresh raw pointer sample. `moved` is how far the
+   * finger travelled (normalized) since the last sample, which bounds how far
+   * the ink may advance along the curve. */
+  function extend(raw: Point, moved: number) {
     setLive((prev) => {
       const cur = cursor.current;
 
@@ -125,13 +127,29 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
         cursor.current = { seg: hit.seg, vertex: hit.vertex };
         return [...prev, [{ ...pts[hit.vertex] }]];
       }
-      // Same line: walk the curve's real vertices from last index to this one.
+      // Same line: walk the curve's real vertices toward the finger's nearest
+      // vertex, but only as FAR ALONG THE CURVE as the finger actually moved
+      // this sample. Without this cap a small motion (or a mid-line attach)
+      // snaps the ink across a big chunk of the line at once. `budget` is the
+      // finger's raw travel distance; we consume it vertex by vertex and stop
+      // when it runs out, so the ink advances 1:1 with the finger.
       const added: Point[] = [];
       const step = hit.vertex >= cur.vertex ? 1 : -1;
-      for (let k = cur.vertex + step; k !== hit.vertex + step; k += step) {
-        added.push({ ...pts[k] });
+      let budget = moved;
+      let k = cur.vertex;
+      let landed = cur.vertex;
+      while (k !== hit.vertex) {
+        const nk = k + step;
+        const dx = pts[nk].x - pts[k].x;
+        const dy = pts[nk].y - pts[k].y;
+        const segLen = Math.hypot(dx, dy);
+        if (budget < segLen) break; // finger hasn't moved far enough to reach nk
+        budget -= segLen;
+        added.push({ ...pts[nk] });
+        landed = nk;
+        k = nk;
       }
-      cursor.current = { seg: hit.seg, vertex: hit.vertex };
+      cursor.current = { seg: hit.seg, vertex: landed };
       if (added.length === 0) return prev;
       const next = prev.slice();
       next[next.length - 1] = [...next[next.length - 1], ...added];
@@ -147,7 +165,7 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     cursor.current = null;
     lastRaw.current = toBoard(e);
     setLive([]);
-    extend(lastRaw.current);
+    extend(lastRaw.current, 0);
   }
 
   function onPointerMove(e: React.PointerEvent) {
@@ -155,13 +173,16 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     e.preventDefault();
     const raw = toBoard(e);
     const lr = lastRaw.current;
+    let moved = Infinity;
     if (lr) {
       const dx = raw.x - lr.x;
       const dy = raw.y - lr.y;
-      if (dx * dx + dy * dy < MIN_STEP * MIN_STEP) return;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < MIN_STEP * MIN_STEP) return;
+      moved = Math.sqrt(d2);
     }
     lastRaw.current = raw;
-    extend(raw);
+    extend(raw, moved);
   }
 
   function endStroke() {
