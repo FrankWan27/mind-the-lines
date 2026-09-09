@@ -17,6 +17,27 @@ const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN ?? 'http://localhost:5173')
   .map((o) => o.trim())
   .filter(Boolean);
 
+// Render sets IS_PULL_REQUEST=true on PR preview instances. On a preview the
+// client is served from a throwaway *.vercel.app URL that we can't know ahead
+// of time, so widen CORS to accept any Vercel preview origin there. This never
+// loosens production, which runs with IS_PULL_REQUEST unset/false.
+const IS_PR_PREVIEW = process.env.IS_PULL_REQUEST === 'true';
+
+/** Socket.IO CORS origin check: allow the configured origins, plus any
+ * *.vercel.app origin when this is a Render PR preview instance. */
+function corsOrigin(
+  origin: string | undefined,
+  cb: (err: Error | null, allow?: boolean) => void,
+) {
+  // Non-browser clients (no Origin header) are allowed through, as before.
+  if (!origin) return cb(null, true);
+  if (CLIENT_ORIGINS.includes(origin)) return cb(null, true);
+  if (IS_PR_PREVIEW && /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) {
+    return cb(null, true);
+  }
+  return cb(null, false);
+}
+
 // 6-char uppercase room codes (no ambiguous chars).
 const roomCodeGen = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
@@ -34,7 +55,7 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
   httpServer,
   {
     cors: {
-      origin: CLIENT_ORIGINS,
+      origin: corsOrigin,
       methods: ['GET', 'POST'],
     },
   },

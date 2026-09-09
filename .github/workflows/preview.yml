@@ -1,0 +1,120 @@
+# Per-PR preview: stand up a throwaway backend on Render, then build the client
+# on Vercel pointed at THAT backend for this PR only.
+#
+# The client bakes VITE_SERVER_URL in at build time, so a Vercel preview would
+# otherwise talk to the mainline Render backend and the PR wouldn't really work.
+# Here we create/fetch the PR's Render service preview, read its URL, and pass
+# it to `vercel build` as a ONE-SHOT --build-env. Nothing persists in Vercel
+# project settings, so there's nothing to clean up when the PR merges; Render
+# auto-deletes its own preview instance on merge/close.
+#
+# Required repo secrets:
+#   RENDER_API_KEY      - Render account API key (Account Settings -> API Keys)
+#   RENDER_SERVICE_ID   - the base Render service to preview (srv-...)
+#   VERCEL_TOKEN        - Vercel personal token
+#   VERCEL_ORG_ID       - Vercel org/team id
+#   VERCEL_PROJECT_ID   - Vercel project id for the client
+name: pr-preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# One in-flight run per PR; a new push cancels the previous build.
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create/refresh the Render service preview for this PR
+        id: render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          set -euo pipefail
+          # Kick off (or refresh) the PR preview for this service.
+          create=$(curl -sS -X POST \
+            "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/preview" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"pullRequestId\": \"${{ github.event.pull_request.number }}\"}")
+          echo "create response: $create"
+
+          # Poll the service's previews until this PR's preview reports a URL.
+          url=""
+          for i in $(seq 1 30); do
+            list=$(curl -sS \
+              "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/previews?limit=50" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}")
+            url=$(echo "$list" | jq -r \
+              --arg pr "${{ github.event.pull_request.number }}" \
+              '[.[].preview // .[] | select((.pullRequestId|tostring)==$pr)][0].url // empty')
+            if [ -n "$url" ]; then break; fi
+            echo "preview URL not ready yet (attempt $i), waiting..."
+            sleep 10
+          done
+
+          if [ -z "$url" ]; then
+            echo "::error::Could not resolve Render preview URL for PR #${{ github.event.pull_request.number }}"
+            exit 1
+          fi
+          echo "Resolved Render preview backend: $url"
+          echo "server_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Pull Vercel project settings
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+
+      - name: Build client with the PR's backend URL (one-shot build var)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        # --build-env sets VITE_SERVER_URL only for THIS build. It is never
+        # written to the Vercel project's stored env vars, so merging the PR
+        # leaves nothing behind to remove.
+        run: |
+          vercel build --token="$VERCEL_TOKEN" \
+            --build-env VITE_SERVER_URL="${{ steps.render.outputs.server_url }}"
+
+      - name: Deploy the prebuilt client to a Vercel preview URL
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          deploy_url=$(vercel deploy --prebuilt --token="$VERCEL_TOKEN")
+          echo "client_url=$deploy_url" >> "$GITHUB_OUTPUT"
+          echo "Preview client: $deploy_url"
+
+      - name: Comment the preview links on the PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-preview
+          message: |
+            **Preview for this PR**
+            - client (Vercel): ${{ steps.deploy.outputs.client_url }}
+            - backend (Render): ${{ steps.render.outputs.server_url }}
+
+            The client build points at the PR's own Render backend. Both are torn
+            down automatically when the PR is merged or closed.
