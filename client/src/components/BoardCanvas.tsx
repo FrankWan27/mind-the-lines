@@ -3,11 +3,14 @@ import type { Board, Point, Segment, Stroke } from '../../../shared/src/types';
 
 const VIEW = 600; // SVG viewBox size; endpoints are normalized 0..1 and scaled to this.
 
-/** Brush radius (normalized): a point on a dealt line within this distance of
- * the pointer gets coloured in. Small, so only the bit under the cursor fills. */
-const BRUSH = 0.035;
+/** Default brush radius (normalized): a point on a dealt line within this
+ * distance of the pointer gets coloured in. Small, so only the bit under the
+ * cursor fills. Adjustable at runtime via the slider. */
+const DEFAULT_BRUSH = 0.028;
+const MIN_BRUSH = 0.012;
+const MAX_BRUSH = 0.06;
 /** Minimum move (normalized) between processed pointer samples, to thin the
- * stream. Kept below BRUSH so the swept circles overlap and leave no gaps. */
+ * stream. Kept below the brush radius so swept circles overlap without gaps. */
 const MIN_STEP = 0.004;
 
 interface Props {
@@ -32,6 +35,9 @@ interface Props {
  * order-independent: painting the same spot twice is idempotent, and lifting or
  * jumping the pointer just leaves the already-coloured runs in place. On commit
  * each maximal run of coloured vertices on a segment becomes one ink polyline.
+ *
+ * The brush radius is shown to the player as a ring that follows the cursor,
+ * and is adjustable with the pen-size slider.
  */
 export default function BoardCanvas({ board, value, editable, onChange }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -39,6 +45,9 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
   const covered = useRef<boolean[][]>([]);
   // Bump to re-render as coverage changes mid-gesture (refs don't trigger it).
   const [tick, setTick] = useState(0);
+  const [brush, setBrush] = useState(DEFAULT_BRUSH);
+  // Cursor position (normalized) for the pen-size ring, or null when off-board.
+  const [hover, setHover] = useState<Point | null>(null);
   const drawing = useRef(false);
   const lastRaw = useRef<Point | null>(null);
 
@@ -59,9 +68,9 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     return board.segments.map((s) => new Array<boolean>(s.points.length).fill(false));
   }
 
-  /** Paint: mark every dealt-curve vertex within BRUSH of the pointer. */
+  /** Paint: mark every dealt-curve vertex within the brush radius of the pointer. */
   function paintAt(p: Point) {
-    const r2 = BRUSH * BRUSH;
+    const r2 = brush * brush;
     const cov = covered.current;
     let changed = false;
     board.segments.forEach((s: Segment, si) => {
@@ -108,13 +117,15 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     drawing.current = true;
     covered.current = freshCoverage();
     lastRaw.current = toBoard(e);
+    setHover(lastRaw.current);
     paintAt(lastRaw.current);
   }
 
   function onPointerMove(e: React.PointerEvent) {
+    const raw = toBoard(e);
+    if (editable) setHover(raw);
     if (!drawing.current) return;
     e.preventDefault();
-    const raw = toBoard(e);
     const lr = lastRaw.current;
     if (lr) {
       const dx = raw.x - lr.x;
@@ -133,6 +144,11 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
     covered.current = [];
     setTick((t) => t + 1);
     if (onChange && committed.length) onChange([...value, ...committed]);
+  }
+
+  function onPointerLeave() {
+    setHover(null);
+    endStroke();
   }
 
   function clear() {
@@ -162,7 +178,7 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endStroke}
-        onPointerLeave={endStroke}
+        onPointerLeave={onPointerLeave}
         onPointerCancel={endStroke}
       >
         <rect x={0} y={0} width={VIEW} height={VIEW} className="board-bg" rx={12} />
@@ -185,6 +201,16 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
             <polyline key={`live-${i}`} points={toPolyPoints(ss.points)} className="seg-ink live" />
           ) : null,
         )}
+
+        {/* Pen-size ring: shows the brush radius under the cursor. */}
+        {editable && hover && (
+          <circle
+            cx={px(hover.x)}
+            cy={px(hover.y)}
+            r={px(brush)}
+            className="brush-ring"
+          />
+        )}
       </svg>
 
       {editable && (
@@ -195,6 +221,18 @@ export default function BoardCanvas({ board, value, editable, onChange }: Props)
           <button type="button" className="btn ghost" onClick={clear} disabled={value.length === 0}>
             Clear
           </button>
+          <label className="pen-size">
+            <span>Pen size</span>
+            <input
+              type="range"
+              min={MIN_BRUSH}
+              max={MAX_BRUSH}
+              step={0.002}
+              value={brush}
+              onChange={(e) => setBrush(Number(e.target.value))}
+              aria-label="Pen size"
+            />
+          </label>
           <span className="board-hint">Colour in the lines — drag the brush over them</span>
         </div>
       )}
